@@ -43,13 +43,13 @@ type Record struct {
 
 // DeliveryAttempt records a single outbound delivery attempt.
 type DeliveryAttempt struct {
-	ID             string
-	NotificationID string
-	AttemptNumber  int
-	Status         AttemptStatus
-	HTTPStatus     *int
-	Error          *string
-	CreatedAt      time.Time
+	ID             string        `json:"id"`
+	NotificationID string        `json:"notification_id"`
+	AttemptNumber  int           `json:"attempt_number"`
+	Status         AttemptStatus `json:"status"`
+	HTTPStatus     *int          `json:"http_status,omitempty"`
+	Error          *string       `json:"error,omitempty"`
+	CreatedAt      time.Time     `json:"created_at"`
 }
 
 // Store persists notification records before delivery.
@@ -286,6 +286,99 @@ func scanRecord(s scanner) (*Record, error) {
 	}
 	r.NextRetryAt = nextRetryAt
 	return &r, nil
+}
+
+// DLQRecord is a dead notification bundled with its full delivery attempt history.
+type DLQRecord struct {
+	ID           string            `json:"id"`
+	VendorID     string            `json:"vendor_id"`
+	RenderedBody string            `json:"payload"`
+	Headers      map[string]string `json:"headers"`
+	TargetURL    string            `json:"target_url"`
+	Method       string            `json:"method"`
+	Status       Status            `json:"status"`
+	RetryCount   int               `json:"retry_count"`
+	CreatedAt    time.Time         `json:"created_at"`
+	Attempts     []*DeliveryAttempt `json:"attempts"`
+}
+
+// DLQStore exposes dead-letter queue inspection and manual resubmission.
+// SQLiteStore implements this interface.
+type DLQStore interface {
+	// ListDead returns all dead notifications together with their attempt history.
+	ListDead() ([]*DLQRecord, error)
+	// ResubmitDead resets a dead notification to pending for manual re-delivery.
+	// Returns (true, nil) when found and reset; (false, nil) when no matching entry.
+	ResubmitDead(id string) (bool, error)
+}
+
+func (s *SQLiteStore) ListDead() ([]*DLQRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, vendor_id, rendered_body, headers, target_url, method, status, retry_count, next_retry_at, created_at
+		FROM notifications WHERE status='dead' ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*DLQRecord
+	for rows.Next() {
+		r, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		attempts, err := s.listAttempts(r.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &DLQRecord{
+			ID:           r.ID,
+			VendorID:     r.VendorID,
+			RenderedBody: r.RenderedBody,
+			Headers:      r.Headers,
+			TargetURL:    r.TargetURL,
+			Method:       r.Method,
+			Status:       r.Status,
+			RetryCount:   r.RetryCount,
+			CreatedAt:    r.CreatedAt,
+			Attempts:     attempts,
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) listAttempts(notifID string) ([]*DeliveryAttempt, error) {
+	rows, err := s.db.Query(`
+		SELECT id, notification_id, attempt_number, status, http_status, error, created_at
+		FROM delivery_attempts WHERE notification_id=? ORDER BY attempt_number
+	`, notifID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*DeliveryAttempt
+	for rows.Next() {
+		var a DeliveryAttempt
+		if err := rows.Scan(&a.ID, &a.NotificationID, &a.AttemptNumber, &a.Status, &a.HTTPStatus, &a.Error, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) ResubmitDead(id string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE notifications SET status='pending', retry_count=0, next_retry_at=NULL WHERE id=? AND status='dead'`,
+		id,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // InMemoryStore persists notifications in memory — used in tests.
