@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/lqquReactNative/rc_xiaohou/internal/delivery"
+	"github.com/lqquReactNative/rc_xiaohou/internal/dlq"
 	"github.com/lqquReactNative/rc_xiaohou/internal/notification"
 	"github.com/lqquReactNative/rc_xiaohou/internal/vendor"
 )
@@ -51,6 +52,7 @@ func main() {
 
 	r.Mount("/vendors", vendor.NewHandler(vendorStore).Routes())
 	r.Mount("/notifications", notification.NewHandler(vendorStore, notification.NewPersistingEnqueuer(notifStore)).Routes())
+	r.Mount("/dlq", dlq.NewHandler(notifStore).Routes())
 
 	srv := &http.Server{Addr: addr, Handler: r}
 	go func() {
