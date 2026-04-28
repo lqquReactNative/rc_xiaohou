@@ -19,18 +19,25 @@ func main() {
 		log.Fatalf("failed to create data dir: %v", err)
 	}
 
-	store, err := vendor.NewJSONStore(dataFile)
+	vendorStore, err := vendor.NewJSONStore(dataFile)
 	if err != nil {
 		log.Fatalf("failed to init vendor store: %v", err)
 	}
+
+	notifDBPath := envOrDefault("NOTIFICATION_DB_PATH", "data/notifications.db")
+	notifStore, err := notification.NewSQLiteStore(notifDBPath)
+	if err != nil {
+		log.Fatalf("failed to init notification store: %v", err)
+	}
+	defer notifStore.Close()
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 
-	r.Mount("/vendors", vendor.NewHandler(store).Routes())
-	r.Mount("/notifications", notification.NewHandler(store, notification.NewSyncEnqueuer()).Routes())
+	r.Mount("/vendors", vendor.NewHandler(vendorStore).Routes())
+	r.Mount("/notifications", notification.NewHandler(vendorStore, notification.NewPersistingEnqueuer(notifStore)).Routes())
 
 	log.Printf("listening on %s", addr)
 	if err := http.ListenAndServe(addr, r); err != nil {
