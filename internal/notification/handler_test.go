@@ -3,14 +3,22 @@ package notification_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/lqquReactNative/rc_xiaohou/internal/notification"
 	"github.com/lqquReactNative/rc_xiaohou/internal/vendor"
 )
+
+type errEnqueuer struct{}
+
+func (e *errEnqueuer) Enqueue(_, _ string, _ map[string]string, _, _ string) (string, error) {
+	return "", errors.New("enqueue failed")
+}
 
 func newTestHandler(t *testing.T) (http.Handler, vendor.Store) {
 	t.Helper()
@@ -112,5 +120,60 @@ func TestSubmit_TemplateMissingVariable(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status: got %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+// AC4: missing payload field → 400 with clear error message.
+func TestSubmit_MissingPayload(t *testing.T) {
+	handler, _ := newTestHandler(t)
+	rec := postJSON(handler, "/", map[string]interface{}{
+		"vendor_id": "some-vendor",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	var body map[string]string
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["error"] != "payload is required" {
+		t.Errorf("error message: got %q, want %q", body["error"], "payload is required")
+	}
+}
+
+// AC4: invalid JSON body → 400.
+func TestSubmit_InvalidJSON(t *testing.T) {
+	handler, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{not valid json"))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// AC1 error path: enqueuer failure → 500.
+func TestSubmit_EnqueuerError(t *testing.T) {
+	f, _ := os.CreateTemp(t.TempDir(), "vendors-*.json")
+	f.Close()
+	os.Remove(f.Name())
+	store, err := vendor.NewJSONStore(f.Name())
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	profile, _ := store.Create(vendor.CreateRequest{
+		Name:      "Error Vendor",
+		TargetURL: "https://v.example.com",
+		Method:    "POST",
+	})
+
+	h := notification.NewHandler(store, &errEnqueuer{})
+	handler := h.Routes()
+
+	rec := postJSON(handler, "/", map[string]interface{}{
+		"vendor_id": profile.ID,
+		"payload":   map[string]interface{}{},
+	})
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status: got %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
 }

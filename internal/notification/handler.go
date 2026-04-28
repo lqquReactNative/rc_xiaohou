@@ -41,6 +41,10 @@ func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "vendor_id is required")
 		return
 	}
+	if req.Payload == nil {
+		writeError(w, http.StatusBadRequest, "payload is required")
+		return
+	}
 
 	// AC3: fail at intake if vendor is unknown
 	profile, err := h.vendors.Get(req.VendorID)
