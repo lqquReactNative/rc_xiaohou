@@ -76,7 +76,9 @@ func (w *Worker) ProcessOnce(ctx context.Context) error {
 
 func (w *Worker) deliver(r *notification.Record) {
 	attemptNumber := r.RetryCount + 1
+	start := time.Now()
 	result := w.send(r)
+	latencyMs := time.Since(start).Milliseconds()
 
 	// Build attempt record
 	var httpStatusPtr *int
@@ -97,7 +99,7 @@ func (w *Worker) deliver(r *notification.Record) {
 	if isSuccess {
 		attemptStatus = notification.AttemptSuccess
 	}
-	if err := w.store.RecordAttempt(r.ID, attemptNumber, attemptStatus, httpStatusPtr, errMsgPtr); err != nil {
+	if err := w.store.RecordAttempt(r.ID, attemptNumber, attemptStatus, httpStatusPtr, errMsgPtr, latencyMs); err != nil {
 		w.logger.Error("record attempt", "err", err)
 	}
 

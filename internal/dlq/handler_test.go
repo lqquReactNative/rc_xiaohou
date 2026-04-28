@@ -89,10 +89,10 @@ func TestListDLQ_EntryContainsFullContext(t *testing.T) {
 
 	s1 := 503
 	e1 := "upstream error"
-	store.RecordAttempt(r.ID, 1, notification.AttemptFailed, &s1, &e1) //nolint:errcheck
+	store.RecordAttempt(r.ID, 1, notification.AttemptFailed, &s1, &e1, 120) //nolint:errcheck
 	s2 := 503
 	e2 := "still down"
-	store.RecordAttempt(r.ID, 2, notification.AttemptFailed, &s2, &e2) //nolint:errcheck
+	store.RecordAttempt(r.ID, 2, notification.AttemptFailed, &s2, &e2, 85) //nolint:errcheck
 	store.MarkDead(r.ID)                                                 //nolint:errcheck
 
 	router := newRouter(store)

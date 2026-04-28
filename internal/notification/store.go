@@ -49,6 +49,7 @@ type DeliveryAttempt struct {
 	Status         AttemptStatus `json:"status"`
 	HTTPStatus     *int          `json:"http_status,omitempty"`
 	Error          *string       `json:"error,omitempty"`
+	LatencyMs      int64         `json:"latency_ms"` // round-trip time to vendor (AC3)
 	CreatedAt      time.Time     `json:"created_at"`
 }
 
@@ -70,7 +71,7 @@ type DeliveryStore interface {
 	MarkFailed(id string) error
 	// MarkDead moves the notification to dead-letter state (retry budget exhausted).
 	MarkDead(id string) error
-	RecordAttempt(notifID string, attemptNumber int, status AttemptStatus, httpStatus *int, errMsg *string) error
+	RecordAttempt(notifID string, attemptNumber int, status AttemptStatus, httpStatus *int, errMsg *string, latencyMs int64) error
 	// ResetNextRetryAt clears next_retry_at for test helpers.
 	ResetNextRetryAt(id string) error
 }
@@ -149,10 +150,16 @@ func migrate(db *sql.DB) error {
 			status          TEXT NOT NULL,
 			http_status     INTEGER,
 			error           TEXT,
+			latency_ms      INTEGER NOT NULL DEFAULT 0,
 			created_at      TIMESTAMP NOT NULL
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Migration: add latency_ms to existing delivery_attempts tables (idempotent).
+	_, _ = db.Exec(`ALTER TABLE delivery_attempts ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0`)
+	return nil
 }
 
 func (s *SQLiteStore) Save(ctx context.Context, r *Record) error {
@@ -228,12 +235,12 @@ func (s *SQLiteStore) MarkDead(id string) error {
 	return err
 }
 
-func (s *SQLiteStore) RecordAttempt(notifID string, attemptNumber int, status AttemptStatus, httpStatus *int, errMsg *string) error {
+func (s *SQLiteStore) RecordAttempt(notifID string, attemptNumber int, status AttemptStatus, httpStatus *int, errMsg *string, latencyMs int64) error {
 	_, err := s.db.Exec(
-		`INSERT INTO delivery_attempts(id, notification_id, attempt_number, status, http_status, error, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
+		`INSERT INTO delivery_attempts(id, notification_id, attempt_number, status, http_status, error, latency_ms, created_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
 		uuid.New().String(), notifID, attemptNumber, string(status),
-		httpStatus, errMsg, time.Now().UTC(),
+		httpStatus, errMsg, latencyMs, time.Now().UTC(),
 	)
 	return err
 }
@@ -263,6 +270,28 @@ func (s *SQLiteStore) GetByID(id string) (*Record, error) {
 func (s *SQLiteStore) ResetNextRetryAt(id string) error {
 	_, err := s.db.Exec(`UPDATE notifications SET next_retry_at=NULL, status='pending' WHERE id=?`, id)
 	return err
+}
+
+// GetAttempts returns all delivery attempts for a notification, ordered by creation time.
+// Used in tests to verify AC3 (attempt logging with outcome details).
+func (s *SQLiteStore) GetAttempts(notifID string) ([]*DeliveryAttempt, error) {
+	rows, err := s.db.Query(
+		`SELECT id, notification_id, attempt_number, status, http_status, error, latency_ms, created_at
+		 FROM delivery_attempts WHERE notification_id=? ORDER BY created_at`, notifID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*DeliveryAttempt
+	for rows.Next() {
+		a := &DeliveryAttempt{}
+		if err := rows.Scan(&a.ID, &a.NotificationID, &a.AttemptNumber, &a.Status,
+			&a.HTTPStatus, &a.Error, &a.LatencyMs, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLiteStore) Close() error { return s.db.Close() }
