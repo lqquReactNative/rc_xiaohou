@@ -31,6 +31,18 @@ func NewWorker(s notification.DeliveryStore, policy RetryPolicy, timeout, interv
 	}
 }
 
+// NewWorkerWithClient creates a Worker with a caller-supplied HTTP client.
+// Useful in tests to inject a custom client without needing a timeout duration.
+func NewWorkerWithClient(s notification.DeliveryStore, policy RetryPolicy, client *http.Client) *Worker {
+	return &Worker{
+		store:    s,
+		policy:   policy,
+		client:   client,
+		interval: 10 * time.Second,
+		logger:   slog.Default(),
+	}
+}
+
 // Run starts the delivery loop and blocks until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
@@ -106,9 +118,15 @@ func (w *Worker) deliver(r *notification.Record) {
 
 	delay, canRetry := w.policy.NextRetry(r.RetryCount)
 	if !canRetry {
-		w.logger.Warn("retry budget exhausted, moving to DLQ",
-			"notification_id", r.ID, "attempts", attemptNumber)
+		// AC2 (WOR-15): structured ERROR alert on DLQ insertion so operators are
+		// notified promptly that manual intervention is needed.
 		_ = w.store.MarkDead(r.ID)
+		w.logger.Error("notification moved to dead-letter queue",
+			"notification_id", r.ID,
+			"vendor_id", r.VendorID,
+			"attempts", attemptNumber,
+			"last_http_status", result.httpStatus,
+		)
 		return
 	}
 
